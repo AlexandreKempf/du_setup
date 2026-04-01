@@ -1,13 +1,17 @@
 #!/bin/bash
 
 # Debian and Ubuntu Server Hardening Interactive Script
-# Version: 0.78.4 | 2025-11-27
+# Version: 0.80.0 | 2026-01-19
 # Changelog:
+# - v0.80.0: Added 2FA, optionally set 2FA for SSH Login.
+# - v0.79.1: Added CrowdSec collections install to CrowdSec setup.
+# - v0.79.0: Added CrowdSec, now you can choose between fail2ban and CrowdSec for system level firewall.
+# - v0.78.5: Switched to using nano as the default editor in .bashrc.
 # - v0.78.4: Improved configure_swap to detect swap partitions vs files.
 #            Prevents 'fallocate' crashes on physical partitions by offering to disable them or skip.
 # - v0.78.3: Update the summary to try to show the right environment detection based on finding personal VMs and cloud VPS.
 #            Run update & upgrade in the final step to ensure system is fully updated after restart.
-# - v0.78.2: In configure_system set choosen hostname from collect_config in the /etc/hosts
+# - v0.78.2: In configure_system set chosen hostname from collect_config in the /etc/hosts
 # - v0.78.1: Collect config failure fixed on IPv6 only VPS.
 # - v0.78: Script tries to handles different environments: Direct Public IP, NAT/Router and Local VM only
 #          The configure_ssh function provides context-aware instructions based on different environments.
@@ -33,7 +37,7 @@
 # - v0.68: Enable UFW IPv6 support if available
 # - v0.67: Do not log taiscale auth key in log file
 # - v0.66: While configuring and in the summary, display both IPv6 and IPv4.
-# - v0.65: If reconfigure locales - appy newly configured locale to the current environment.
+# - v0.65: If reconfigure locales - apply newly configured locale to the current environment.
 # - v0.64: Tested at Debian 13 to confirm it works as expected
 # - v0.63: Added ssh install in key packages
 # - v0.62: Added fix for fail2ban by creating empty ufw log file
@@ -95,7 +99,7 @@
 set -euo pipefail
 
 # --- Update Configuration ---
-CURRENT_VERSION="0.78.4"
+CURRENT_VERSION="0.80.0"
 SCRIPT_URL="https://raw.githubusercontent.com/buildplan/du_setup/refs/heads/main/du_setup.sh"
 CHECKSUM_URL="${SCRIPT_URL}.sha256"
 
@@ -153,6 +157,9 @@ SSH_SERVICE=""
 ID="" # This will be populated from /etc/os-release
 FAILED_SERVICES=()
 PREVIOUS_SSH_PORT=""
+
+IDS_INSTALLED=""
+TWO_FACTOR_ENABLED="false"
 
 # --- --help ---
 show_usage() {
@@ -251,7 +258,7 @@ print_header() {
     printf '%s\n' "${CYAN}╔═════════════════════════════════════════════════════════════════╗${NC}"
     printf '%s\n' "${CYAN}║                                                                 ║${NC}"
     printf '%s\n' "${CYAN}║       DEBIAN/UBUNTU SERVER SETUP AND HARDENING SCRIPT           ║${NC}"
-    printf '%s\n' "${CYAN}║                      v0.78.4 | 2025-11-27                       ║${NC}"
+    printf '%s\n' "${CYAN}║                      v0.80.0 | 2026-01-19                       ║${NC}"
     printf '%s\n' "${CYAN}║                                                                 ║${NC}"
     printf '%s\n' "${CYAN}╚═════════════════════════════════════════════════════════════════╝${NC}"
     printf '\n'
@@ -1101,8 +1108,8 @@ configure_custom_bashrc() {
     if ! cat > "$temp_source_bashrc" <<'EOF'
 # shellcheck shell=bash
 # ===================================================================
-#   Universal Portable .bashrc for Modern Terminals
-#   Optimized for Debian/Ubuntu servers with multi-terminal support
+#   Universal Portable .bashrc
+#   For Debian/Ubuntu servers with multi-terminal support
 # ===================================================================
 
 # If not running interactively, don't do anything.
@@ -1260,12 +1267,12 @@ __bash_prompt_command() {
 PROMPT_COMMAND=__bash_prompt_command
 
 # --- Editor Configuration ---
-if command -v vim &>/dev/null; then
-    export EDITOR=vim
-    export VISUAL=vim
-elif command -v nano &>/dev/null; then
+if command -v nano &>/dev/null; then
     export EDITOR=nano
     export VISUAL=nano
+elif command -v vim &>/dev/null; then
+    export EDITOR=vim
+    export VISUAL=vim
 else
     export EDITOR=vi
     export VISUAL=vi
@@ -1671,13 +1678,14 @@ alias ltr='ls -alFhtr'     # Sort by modification time, oldest first
 alias lS='ls -alFhS'       # Sort by size, largest first
 
 # Last command with sudo
-alias please='sudo $(history -p !!)'
+alias please='eval sudo "$(history -p !!)"'
 
 # Safety aliases to prompt before overwriting.
 alias rm='rm -i'
 alias cp='cp -i'
 alias mv='mv -i'
 alias ln='ln -i'
+alias mkdir='mkdir -p'
 
 # Convenience & Navigation aliases.
 alias ..='cd ..'
@@ -1727,7 +1735,10 @@ alias pscpu='ps auxf | sort -nr -k 3 | head -10'
 alias top10='ps aux --sort=-%mem | head -n 11'
 
 # Quick network info.
-alias myip='curl -s ifconfig.me || curl -s icanhazip.com' # Alternatives: api.ipify.org, icanhazip.co
+# Get public IP with timeouts (3s), fallbacks, and newline formatting
+alias myip='curl -s --connect-timeout 3 ip.me || curl -s --connect-timeout 3 icanhazip.com || curl -s --connect-timeout 3 ifconfig.me; echo'
+alias myip4='curl -4 -s --connect-timeout 3 ip.me || curl -4 -s --connect-timeout 3 icanhazip.com || curl -4 -s --connect-timeout 3 ifconfig.me; echo'
+alias myip6='curl -6 -s --connect-timeout 3 ip.me || curl -6 -s --connect-timeout 3 icanhazip.com || curl -6 -s --connect-timeout 3 ifconfig.me; echo'
 # Show local IP address(es), excluding loopback.
 localip() {
     ip -4 addr | awk '/inet/ {print $2}' | cut -d/ -f1 | grep -v '127.0.0.1'
@@ -1765,6 +1776,7 @@ if command -v docker &>/dev/null; then
     alias d='docker'
     alias dps='docker ps'
     alias dpsa='docker ps -a'
+    alias dpsn="docker ps --format '{{.Names}}'"
     alias dpsq='docker ps -q'
     alias di='docker images'
     alias dv='docker volume ls'
@@ -2444,7 +2456,7 @@ EOF
     log "Successfully created temporary .bashrc source at $temp_source_bashrc"
 
     if [[ -f "$BASHRC_PATH" ]] && ! grep -q "generated by /usr/sbin/adduser" "$BASHRC_PATH" 2>/dev/null; then
-	    local BASHRC_BACKUP
+            local BASHRC_BACKUP
         BASHRC_BACKUP="$BASHRC_PATH.backup_$(date +%Y%m%d_%H%M%S)"
         print_info "Backing up existing non-default .bashrc to $BASHRC_BACKUP"
         cp "$BASHRC_PATH" "$BASHRC_BACKUP"
@@ -2752,7 +2764,7 @@ check_system() {
         # shellcheck source=/dev/null
         source /etc/os-release
         ID=${ID:-unknown} # Populate global ID variable
-	if [[ $ID == "debian" && $VERSION_ID =~ ^(12|13)$ ]] || \
+        if [[ $ID == "debian" && $VERSION_ID =~ ^(12|13)$ ]] || \
            [[ $ID == "ubuntu" && $VERSION_ID =~ ^(20.04|22.04|24.04)$ ]]; then
             print_success "Compatible OS detected: $PRETTY_NAME"
         else
@@ -2906,10 +2918,10 @@ install_packages() {
     fi
     print_info "Installing essential packages..."
     if ! apt-get install -y -qq \
-        ufw fail2ban unattended-upgrades chrony \
-        rsync wget vim htop iotop nethogs netcat-traditional ncdu \
+        ufw unattended-upgrades chrony rsync wget \
+        vim htop iotop nethogs netcat-traditional ncdu \
         tree rsyslog cron jq gawk coreutils perl skopeo git \
-        apt-listchanges ca-certificates gnupg logrotate \
+        apt-listchanges ca-certificates gnupg logrotate make \
         ssh openssh-client openssh-server; then
         print_error "Failed to install one or more essential packages."
         exit 1
@@ -3254,6 +3266,53 @@ cleanup_and_exit() {
     exit $exit_code
 }
 
+show_connection_options() {
+    local port="$1"
+    local public_ip="$2"
+
+    local TS_IP=""
+    if command -v tailscale >/dev/null 2>&1 && tailscale ip >/dev/null 2>&1; then
+        TS_IP=$(tailscale ip -4 2>/dev/null)
+    fi
+
+    printf "\n"
+
+    # 1. Public IP (Internet)
+    if [[ -n "$public_ip" && "$public_ip" != "Unknown" ]]; then
+         printf "  %-20s ${CYAN}ssh -p %s %s@%s${NC}\n" "Public (Internet):" "$port" "$USERNAME" "$public_ip"
+    fi
+
+    # 2. Internal/LAN IPs
+    local found_internal=false
+    while read -r ip_addr; do
+        local clean_ip="${ip_addr%/*}"
+        if [[ -n "$clean_ip" && "$clean_ip" != "127.0.0.1" && "$clean_ip" != "$public_ip" ]]; then
+             printf "  %-20s ${CYAN}ssh -p %s %s@%s${NC}\n" "Internal/Private:" "$port" "$USERNAME" "$clean_ip"
+             found_internal=true
+        fi
+    done < <(ip -4 -o addr show scope global | awk '{print $4}')
+
+    # show the detected local IP from route (Home VM scenario)
+    if [[ "$found_internal" == false && "$public_ip" == "Unknown" ]]; then
+         local fallback_ip
+         fallback_ip=$(ip -4 route get 8.8.8.8 2>/dev/null | head -1 | awk '{print $7}')
+         if [[ -n "$fallback_ip" ]]; then
+            printf "  %-20s ${CYAN}ssh -p %s %s@%s${NC}\n" "Local (LAN):" "$port" "$USERNAME" "$fallback_ip"
+         fi
+    fi
+
+    # 3. IPv6
+    if [[ -n "$SERVER_IP_V6" && "$SERVER_IP_V6" != "Not available" ]]; then
+        printf "  %-20s ${CYAN}ssh -p %s %s@%s${NC}\n" "IPv6:" "$port" "$USERNAME" "$SERVER_IP_V6"
+    fi
+
+    # 4. Tailscale IP (VPN)
+    if [[ -n "$TS_IP" ]]; then
+        printf "  %-20s ${CYAN}ssh -p %s %s@%s${NC}\n" "Tailscale (VPN):" "$port" "$USERNAME" "$TS_IP"
+    fi
+    printf "\n"
+}
+
 configure_ssh() {
     trap cleanup_and_exit ERR
 
@@ -3314,60 +3373,6 @@ configure_ssh() {
     print_warning "SSH Key Authentication Required for Next Steps!"
     printf '%s\n' "${CYAN}Test SSH access from a SEPARATE terminal now.${NC}"
 
-    # --- Connection Display Function ---
-    show_connection_options() {
-        local port="$1"
-        local public_ip="$2"
-
-        local TS_IP=""
-        if command -v tailscale >/dev/null 2>&1 && tailscale ip >/dev/null 2>&1; then
-            TS_IP=$(tailscale ip -4 2>/dev/null)
-        fi
-
-        printf "\n"
-
-        # 1. Public IP (Internet)
-        # Only show if valid and not "Unknown"
-        if [[ -n "$public_ip" && "$public_ip" != "Unknown" ]]; then
-             printf "  %-20s ${CYAN}ssh -p %s %s@%s${NC}\n" "Public (Internet):" "$port" "$USERNAME" "$public_ip"
-        fi
-
-        # 2. Internal/LAN IPs
-        # scan all interfaces. exclude the Public IP (already shown) and Loopback.
-        local found_internal=false
-        while read -r ip_addr; do
-            # Remove subnet mask if present
-            local clean_ip="${ip_addr%/*}"
-
-            # Skip if empty, loopback, or matches the Public IP we just displayed
-            if [[ -n "$clean_ip" && "$clean_ip" != "127.0.0.1" && "$clean_ip" != "$public_ip" ]]; then
-                 printf "  %-20s ${CYAN}ssh -p %s %s@%s${NC}\n" "Internal/Private:" "$port" "$USERNAME" "$clean_ip"
-                 found_internal=true
-            fi
-        done < <(ip -4 -o addr show scope global | awk '{print $4}')
-
-        # Fallback: If we found NO internal IPs and NO Public IP (local VM offline?),
-        # show the detected local IP from route (Home VM scenario)
-        if [[ "$found_internal" == false && "$public_ip" == "Unknown" ]]; then
-             local fallback_ip
-             fallback_ip=$(ip -4 route get 8.8.8.8 2>/dev/null | head -1 | awk '{print $7}')
-             if [[ -n "$fallback_ip" ]]; then
-                printf "  %-20s ${CYAN}ssh -p %s %s@%s${NC}\n" "Local (LAN):" "$port" "$USERNAME" "$fallback_ip"
-             fi
-        fi
-
-        # 3. IPv6
-        if [[ -n "$SERVER_IP_V6" && "$SERVER_IP_V6" != "Not available" ]]; then
-            printf "  %-20s ${CYAN}ssh -p %s %s@%s${NC}\n" "IPv6:" "$port" "$USERNAME" "$SERVER_IP_V6"
-        fi
-
-        # 4. Tailscale IP (VPN)
-        if [[ -n "$TS_IP" ]]; then
-            printf "  %-20s ${CYAN}ssh -p %s %s@%s${NC}\n" "Tailscale (VPN):" "$port" "$USERNAME" "$TS_IP"
-        fi
-        printf "\n"
-    }
-
     # Show options for CURRENT port
     show_connection_options "$CURRENT_SSH_PORT" "$SERVER_IP_V4"
 
@@ -3409,7 +3414,7 @@ EOF
 ******************************************************************************
 EOF
     print_info "Testing SSH configuration syntax..."
-	if ! sshd -t 2>&1 | tee -a "$LOG_FILE"; then
+        if ! sshd -t 2>&1 | tee -a "$LOG_FILE"; then
         print_warning "SSH configuration test detected potential issues (see above)."
         print_info "This may be due to existing configuration files on the system."
         if ! confirm "Continue despite configuration warnings?"; then
@@ -3671,6 +3676,157 @@ rollback_ssh_changes() {
     return 0
 }
 
+configure_2fa() {
+    print_section "Two-Factor Authentication (2FA) Setup"
+    print_info "2FA adds an extra layer of security by requiring a time-based code (TOTP) along with your SSH key."
+    print_info "Note: This will be configured specifically for the user '$USERNAME'."
+
+    if ! confirm "Setup 2FA (Google Authenticator) for user '$USERNAME'?"; then
+        print_info "Skipping 2FA setup."
+        return 0
+    fi
+
+    # 1. Install Dependencies
+    print_info "Installing libpam-google-authenticator and qrencode..."
+    if ! apt-get update -qq || ! apt-get install -y -qq libpam-google-authenticator qrencode; then
+        print_error "Failed to install required packages. Aborting 2FA setup."
+        return 1
+    fi
+
+    local USER_HOME
+    USER_HOME=$(getent passwd "$USERNAME" | cut -d: -f6)
+    local GA_FILE="$USER_HOME/.google_authenticator"
+    local SETUP_SUCCESS=false
+
+    # 2. Generate Secret
+    if [[ -f "$GA_FILE" ]]; then
+        print_warning "2FA configuration already exists for $USERNAME."
+        if ! confirm "Regenerate secret (this will invalidate old codes)?"; then
+            print_info "Keeping existing 2FA configuration."
+            SETUP_SUCCESS=true
+        else
+            rm -f "$GA_FILE"
+        fi
+    fi
+
+    if [[ "$SETUP_SUCCESS" == "false" ]]; then
+        print_info "Generating 2FA secret for $USERNAME..."
+
+        # Run google-authenticator non-interactively
+        # -t: time-based, -d: disallow reuse, -f: force to file, -r 3 -R 30: rate limit, -w 3: window size
+        if ! sudo -u "$USERNAME" google-authenticator -t -d -f -r 3 -R 30 -w 3 -q; then
+             print_error "Failed to generate 2FA configuration."
+             return 1
+        fi
+
+        # Extract secret for display
+        local SECRET
+        SECRET=$(head -n 1 "$GA_FILE")
+        local QR_LABEL="${USERNAME}@${SERVER_NAME}"
+        local QR_URL; QR_URL="otpauth://totp/${QR_LABEL}?secret=${SECRET}&issuer=$(hostname)"
+
+        print_section "ACTION REQUIRED: Setup Authenticator App"
+        printf '%s\n' "${YELLOW}1. Open your Authenticator App (Google Auth, Authy, etc.)${NC}"
+        printf '%s\n' "${YELLOW}2. Scan the QR Code below:${NC}"
+        printf '\n'
+
+        # Display QR Code in terminal
+        qrencode -t ANSIUTF8 "$QR_URL"
+
+        printf '\n'
+        printf "   %s: %s\n" "${CYAN}Secret Key (if QR fails)${NC}" "${BOLD}$SECRET${NC}"
+        printf '\n'
+        printf '%s\n' "${RED}SAVE THESE EMERGENCY SCRATCH CODES:${NC}"
+        grep -E '^[0-9]{8}$' "$GA_FILE"
+        printf '\n'
+
+        if ! confirm "Have you saved the secret/codes and set up your app?"; then
+             print_warning "Aborting 2FA setup to prevent lockout."
+             rm -f "$GA_FILE"
+             return 1
+        fi
+        SETUP_SUCCESS=true
+    fi
+
+    # 3. Configure PAM
+    local PAM_FILE="/etc/pam.d/sshd"
+    print_info "Configuring PAM ($PAM_FILE)..."
+    if ! grep -q "pam_google_authenticator.so" "$PAM_FILE"; then
+        cp "$PAM_FILE" "${PAM_FILE}.backup_$(date +%Y%m%d_%H%M%S)"
+        # Prepend to ensure it runs
+        sed -i '1i auth required pam_google_authenticator.so nullok' "$PAM_FILE"
+        print_success "Updated PAM configuration."
+    else
+        print_info "PAM already configured."
+    fi
+
+    # 4. Configure SSH
+    print_info "Configuring SSH to enforce 2FA for '$USERNAME'..."
+    local SSH_DROPIN_DIR="/etc/ssh/sshd_config.d"
+    local SSH_2FA_CONF="$SSH_DROPIN_DIR/95-2fa-${USERNAME}.conf"
+    local USE_DROPIN=false
+
+    # Check if drop-in directory exists and is included (standard on Ubuntu 20.04+/Debian 12)
+    if [[ -d "$SSH_DROPIN_DIR" ]] && grep -q "^Include /etc/ssh/sshd_config.d/\*.conf" /etc/ssh/sshd_config; then
+        USE_DROPIN=true
+    fi
+
+    local CONFIG_CONTENT="Match User $USERNAME
+    AuthenticationMethods publickey,keyboard-interactive
+    KbdInteractiveAuthentication yes
+"
+
+    if [[ "$USE_DROPIN" == "true" ]]; then
+        echo "$CONFIG_CONTENT" > "$SSH_2FA_CONF"
+        print_success "Created SSH user config: $SSH_2FA_CONF"
+    else
+        # Fallback for older systems: Append to main config
+        print_warning "Drop-in config not supported. Appending to /etc/ssh/sshd_config."
+        cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup_2fa
+        # Ensure global KbdInteractive is enabled if not already
+        if ! grep -q "^KbdInteractiveAuthentication yes" /etc/ssh/sshd_config && ! grep -q "^ChallengeResponseAuthentication yes" /etc/ssh/sshd_config; then
+             echo "KbdInteractiveAuthentication yes" >> /etc/ssh/sshd_config
+        fi
+        if ! grep -q "Match User $USERNAME" /etc/ssh/sshd_config; then
+             echo "$CONFIG_CONTENT" >> /etc/ssh/sshd_config
+        fi
+    fi
+
+    # 5. Restart and Verify
+    print_info "Restarting SSH service..."
+    if ! systemctl restart "$SSH_SERVICE"; then
+        print_error "Failed to restart SSH service. Reverting 2FA changes..."
+        if [[ "$USE_DROPIN" == "true" ]]; then rm -f "$SSH_2FA_CONF"; else cp /etc/ssh/sshd_config.backup_2fa /etc/ssh/sshd_config; fi
+        sed -i '/pam_google_authenticator.so/d' "$PAM_FILE"
+        return 1
+    fi
+
+    print_warning "CRITICAL VERIFICATION STEP"
+    print_info "Do NOT close this terminal."
+    print_info "Open a NEW terminal window and try to SSH in as $USERNAME."
+    print_info "You should be asked for your SSH Key passphrase (if set) FOLLOWED by the Verification Code."
+    print_info "With default PAM settings, you may ALSO be asked for $USERNAME password."
+
+    show_connection_options "$SSH_PORT" "$SERVER_IP_V4"
+
+    if confirm "Was the login successful?"; then
+        print_success "2FA setup verified and active."
+        TWO_FACTOR_ENABLED=true
+        log "2FA enabled for user $USERNAME."
+    else
+        print_error "Login verification failed. Reverting 2FA changes..."
+        if [[ "$USE_DROPIN" == "true" ]]; then
+            rm -f "$SSH_2FA_CONF"
+        else
+            # Basic cleanup for non-dropin
+            sed -i "/Match User $USERNAME/,+3d" /etc/ssh/sshd_config
+        fi
+        sed -i '/pam_google_authenticator.so/d' "$PAM_FILE"
+        systemctl restart "$SSH_SERVICE"
+        print_info "2FA changes reverted. Your SSH access should be standard."
+    fi
+}
+
 configure_firewall() {
     print_section "Firewall Configuration (UFW)"
     if ufw status | grep -q "Status: active"; then
@@ -3794,6 +3950,15 @@ configure_firewall() {
 
 configure_fail2ban() {
     print_section "Fail2Ban Configuration"
+
+    # Install Fail2Ban if not present
+    if ! dpkg -l fail2ban | grep -q ^ii; then
+        print_info "Installing Fail2Ban..."
+        if ! apt-get install -y -qq fail2ban; then
+            print_error "Failed to install Fail2Ban."
+            return 1
+        fi
+    fi
 
     # --- Collect User IPs to Ignore ---
     local -a IGNORE_IPS=("127.0.0.1/8" "::1") # Array for easier dedup.
@@ -3979,6 +4144,148 @@ EOF
         FAILED_SERVICES+=("fail2ban")
     fi
     log "Fail2Ban configuration completed."
+}
+
+configure_crowdsec() {
+    print_section "CrowdSec Configuration"
+
+    # Check if already installed
+    if command -v crowdsec >/dev/null 2>&1; then
+        print_info "CrowdSec is already installed."
+    else
+        print_info "Setting up CrowdSec repository..."
+        if ! curl -s https://install.crowdsec.net | sh >> "$LOG_FILE" 2>&1; then
+             print_error "Failed to setup CrowdSec repository."
+             return 1
+        fi
+
+        print_info "Installing CrowdSec agent..."
+        if ! apt-get update -qq || ! apt-get install -y -qq crowdsec; then
+            print_error "Failed to install CrowdSec."
+            return 1
+        fi
+        print_success "CrowdSec agent installed."
+    fi
+
+    # Install Firewall Bouncer
+    if ! dpkg -l crowdsec-firewall-bouncer-iptables | grep -q ^ii; then
+        print_info "Installing CrowdSec Firewall Bouncer (iptables/UFW support)..."
+        if ! apt-get install -y -qq crowdsec-firewall-bouncer-iptables; then
+             print_warning "Failed to install firewall bouncer. CrowdSec will detect but NOT block attacks."
+        else
+             print_success "CrowdSec Firewall Bouncer installed."
+        fi
+    else
+        print_info "CrowdSec Firewall Bouncer already installed."
+    fi
+
+    # Core Collections
+    print_info "Installing base collections (Linux & Iptables)..."
+    if cscli collections install crowdsecurity/linux crowdsecurity/iptables 2>&1 | tee -a "$LOG_FILE"; then
+        print_success "Base collections installed."
+    else
+        print_warning "Failed to install base collections. Check logs."
+    fi
+
+    # UFW Log Acquisition (Parity with Fail2Ban)
+    mkdir -p /etc/crowdsec/acquis.d
+    print_info "Configuring UFW log acquisition..."
+    if [[ ! -f /var/log/ufw.log ]]; then
+        touch /var/log/ufw.log
+        print_info "Created empty /var/log/ufw.log for monitoring."
+    fi
+    cat <<EOF > /etc/crowdsec/acquis.d/ufw.yaml
+filenames:
+  - /var/log/ufw.log
+labels:
+  type: syslog
+EOF
+    print_success "Added /var/log/ufw.log to CrowdSec acquisition."
+
+    # Optional Additional Collections
+    if confirm "Install additional CrowdSec collections (e.g., Nginx, Apache, HTTP-CVE)?" "n"; then
+        while true; do
+            printf '\n'
+            print_info "Browse collections at: https://app.crowdsec.net/hub/collections"
+            local COLLECTION_NAME
+            read -rp "$(printf '%s' "${CYAN}Enter collection name (e.g. crowdsecurity/nginx) or 'done': ${NC}")" COLLECTION_NAME
+
+            [[ "$COLLECTION_NAME" == "done" || -z "$COLLECTION_NAME" ]] && break
+
+            print_info "Installing $COLLECTION_NAME..."
+            if cscli collections install "$COLLECTION_NAME" 2>&1 | tee -a "$LOG_FILE"; then
+                print_success "Collection $COLLECTION_NAME installed."
+
+                # Interactive Acquisition Setup
+                if confirm "Configure log file monitoring for $COLLECTION_NAME?" "y"; then
+                    local LOG_PATH LOG_TYPE
+                    print_info "Example Log Path: /var/log/nginx/*.log"
+                    read -rp "$(printf '%s' "${CYAN}Enter log file path: ${NC}")" LOG_PATH
+
+                    print_info "Example Label Type: nginx (must match the collection's parser)"
+                    read -rp "$(printf '%s' "${CYAN}Enter label type: ${NC}")" LOG_TYPE
+
+                    if [[ -n "$LOG_PATH" && -n "$LOG_TYPE" ]]; then
+                        # Sanitize filename from the type
+                        local SAFE_NAME=${LOG_TYPE//[^a-zA-Z0-9]/_}
+                        local ACQUIS_FILE="/etc/crowdsec/acquis.d/${SAFE_NAME}.yaml"
+
+                        mkdir -p /etc/crowdsec/acquis.d
+                        cat <<EOF > "$ACQUIS_FILE"
+filenames:
+  - $LOG_PATH
+labels:
+  type: $LOG_TYPE
+EOF
+                        print_success "Acquisition configured: $ACQUIS_FILE"
+                        log "Created custom acquisition for $COLLECTION_NAME at $ACQUIS_FILE"
+                    else
+                        print_warning "Skipped acquisition config due to empty input."
+                    fi
+                fi
+            else
+                print_error "Failed to install $COLLECTION_NAME. Check spelling or connection."
+            fi
+        done
+    fi
+
+    # Enrollment
+    if confirm "Enroll this instance in the CrowdSec Console (optional)?" "n"; then
+        local ENROLL_KEY
+        while true; do
+            read -rp "$(printf '%s' "${CYAN}Enter your CrowdSec Enrollment Key: ${NC}")" ENROLL_KEY
+            if [[ -n "$ENROLL_KEY" ]]; then
+                print_info "Enrolling instance..."
+                if cscli console enroll "$ENROLL_KEY" 2>&1 | tee -a "$LOG_FILE"; then
+                    print_success "Instance enrolled successfully."
+                    break
+                else
+                    print_error "Enrollment failed. Check the key and try again."
+                    if confirm "Skip enrollment?" "n"; then break; fi
+                fi
+            else
+                print_error "Key cannot be empty."
+            fi
+        done
+    fi
+
+    # Reload to ensure everything is active
+    systemctl restart crowdsec
+    print_info "Restarted CrowdSec service to apply configurations."
+    print_success "CrowdSec configuration completed."
+
+    # Help Section
+    printf '\n%s\n' "${YELLOW}CrowdSec Quick Reference:${NC}"
+    printf "  %-30s %s\n" "sudo cscli metrics" "# View local metrics"
+    printf "  %-30s %s\n" "sudo cscli decisions list" "# View active bans/decisions"
+    printf "  %-30s %s\n" "sudo cscli bouncers list" "# Check bouncer status"
+    printf "  %-30s %s\n" "sudo cscli collections list" "# View installed collections"
+    printf "  %-30s %s\n" "sudo cscli parsers list" "# View installed parsers"
+    printf "  %-30s %s\n" "sudo cscli scenarios list" "# View active scenarios"
+    printf "  %-30s %s\n" "sudo cscli alerts list" "# View recent alerts"
+    printf "  %-30s %s\n" "sudo cscli hub update && sudo cscli hub upgrade" "# Update CrowdSec scenarios"
+    printf '\n'
+    log "CrowdSec configuration completed."
 }
 
 configure_auto_updates() {
@@ -4421,7 +4728,7 @@ install_tailscale() {
                 if $CONNECTED; then
                     print_success "Tailscale reconfigured with additional options. Node IPv4 in tailnet: $TS_IPV4"
                     log "Tailscale reconfigured: $TS_COMMAND_SAFE"
-		    # Store flags and IPs for summary
+                    # Store flags and IPs for summary
                     echo "$TS_FLAGS" | sed 's/ --/ /g' | sed 's/^ *//' > /tmp/tailscale_flags
                     echo "$TS_IPS" > /tmp/tailscale_ips.txt
                 else
@@ -5154,7 +5461,7 @@ configure_security_audit() {
         log "Lynis installation failed."
     else
         print_info "Running Lynis audit (non-interactive mode, this will take a few minutes)..."
-	print_warning "Review audit results in $AUDIT_LOG for security recommendations."
+        print_warning "Review audit results in $AUDIT_LOG for security recommendations."
         if lynis audit system --quick >> "$AUDIT_LOG" 2>&1; then
             print_success "Lynis audit completed. Check $AUDIT_LOG for details."
             log "Lynis audit completed successfully."
@@ -5247,7 +5554,7 @@ generate_summary() {
     printf '\n'
 
     print_separator "Final Service Status Check:"
-    for service in "$SSH_SERVICE" fail2ban chrony; do
+    for service in "$SSH_SERVICE" chrony; do
         if systemctl is-active --quiet "$service"; then
             printf "  %-20s ${GREEN}✓ Active${NC}\n" "$service"
         else
@@ -5255,6 +5562,31 @@ generate_summary() {
             FAILED_SERVICES+=("$service")
         fi
     done
+    if [[ "$IDS_INSTALLED" == "fail2ban" ]] || systemctl is-active --quiet fail2ban; then
+         if systemctl is-active --quiet fail2ban; then
+            printf "  %-20s ${GREEN}✓ Active${NC}\n" "Fail2Ban"
+         else
+            printf "  %-20s ${RED}✗ INACTIVE${NC}\n" "Fail2Ban"
+            FAILED_SERVICES+=("fail2ban")
+         fi
+    fi
+
+    if [[ "$IDS_INSTALLED" == "crowdsec" ]] || systemctl is-active --quiet crowdsec; then
+         if systemctl is-active --quiet crowdsec; then
+            printf "  %-20s ${GREEN}✓ Active${NC}\n" "CrowdSec"
+            # Check bouncer
+            if command -v cscli >/dev/null; then
+                if cscli bouncers list -o json | grep -q "firewall-bouncer"; then
+                     printf "  %-20s ${GREEN}✓ Active${NC}\n" "CrowdSec Firewall"
+                else
+                     printf "  %-20s ${YELLOW}⚠ Bouncer Missing${NC}\n" "CrowdSec Firewall"
+                fi
+            fi
+         else
+            printf "  %-20s ${RED}✗ INACTIVE${NC}\n" "CrowdSec"
+            FAILED_SERVICES+=("crowdsec")
+         fi
+    fi
     if ufw status | grep -q "Status: active"; then
         printf "  %-20s ${GREEN}✓ Active${NC}\n" "ufw (firewall)"
     else
@@ -5302,6 +5634,13 @@ generate_summary() {
     fi
     if [[ "${SERVER_IP_V6:-}" != "not available" && "${SERVER_IP_V6:-}" != "Not available" ]]; then
         printf "  %-15s %s\n" "Server IPv6:" "$SERVER_IP_V6"
+    fi
+
+    # --- 2FA Status ---
+    if [[ "$TWO_FACTOR_ENABLED" == "true" ]]; then
+        printf "  %-20s ${GREEN}Enabled (SSH Key + TOTP)${NC}\n" "2FA/MFA:"
+    else
+        printf "  %-20s ${YELLOW}Disabled${NC}\n" "2FA/MFA:"
     fi
 
     # --- Kernel Hardening Status ---
@@ -5449,8 +5788,13 @@ generate_summary() {
     # Other verification commands
     printf "  %-28s ${CYAN}%s${NC}\n" "- Firewall rules:" "sudo ufw status verbose"
     printf "  %-28s ${CYAN}%s${NC}\n" "- Time sync:" "chronyc tracking"
-    printf "  %-28s ${CYAN}%s${NC}\n" "- Fail2Ban sshd jail:" "sudo fail2ban-client status sshd"
-    printf "  %-28s ${CYAN}%s${NC}\n" "- Fail2Ban ufw jail:" "sudo fail2ban-client status ufw-probes"
+    # Adjust verification commands based on selection
+    if [[ "$IDS_INSTALLED" == "fail2ban" ]]; then
+        printf "  %-28s ${CYAN}%s${NC}\n" "- Fail2Ban sshd jail:" "sudo fail2ban-client status sshd"
+    elif [[ "$IDS_INSTALLED" == "crowdsec" ]]; then
+        printf "  %-28s ${CYAN}%s${NC}\n" "- CrowdSec status:" "sudo cscli metrics"
+        printf "  %-28s ${CYAN}%s${NC}\n" "- CrowdSec bans:" "sudo cscli decisions list"
+    fi
     printf "  %-28s ${CYAN}%s${NC}\n" "- Swap status:" "sudo swapon --show && free -h"
     printf "  %-28s ${CYAN}%s${NC}\n" "- Kernel settings:" "sudo sysctl fs.protected_hardlinks kernel.yama.ptrace_scope"
     if command -v docker >/dev/null 2>&1; then
@@ -5556,8 +5900,33 @@ main() {
     setup_user
     configure_system
     configure_firewall
-    configure_fail2ban
+    # --- Choose Firewall fail2ban/CrowdSec ---
+    print_section "Intrusion Detection System (IDS)"
+    printf '%s\n' "${CYAN}Choose an Intrusion Detection/Prevention System:${NC}"
+    printf '  1) Fail2Ban (Classic, simple log parsing, standalone)\n'
+    printf '  2) CrowdSec (Modern, collaborative reputation database, highly recommended)\n'
+    printf '  3) Skip IDS setup\n'
+
+    local IDS_CHOICE
+    read -rp "$(printf '%s' "${CYAN}Enter choice [1]: ${NC}")" IDS_CHOICE
+    IDS_CHOICE=${IDS_CHOICE:-1}
+
+    case "$IDS_CHOICE" in
+        1)
+            configure_fail2ban
+            IDS_INSTALLED="fail2ban"
+            ;;
+        2)
+            configure_crowdsec
+            IDS_INSTALLED="crowdsec"
+            ;;
+        *)
+            print_info "Skipping Intrusion Detection System setup."
+            IDS_INSTALLED="none"
+            ;;
+    esac
     configure_ssh
+    configure_2fa
     configure_auto_updates
     configure_time_sync
     configure_kernel_hardening
